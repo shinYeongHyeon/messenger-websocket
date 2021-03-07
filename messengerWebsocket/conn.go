@@ -2,66 +2,93 @@ package messengerWebsocket
 
 import (
 	"github.com/gorilla/websocket"
+	"github.com/shinYeongHyeon/messenger-websocket/chat"
+	"github.com/shinYeongHyeon/messenger-websocket/db"
 	"log"
 	"sync"
+	"time"
 )
 
-type Conn struct {
-	websocketConn *websocket.Conn
-	send          chan []byte
-	waitGroup     sync.WaitGroup
+const (
+	writeTimeout   = 10 * time.Second
+	readTimeout    = 60 * time.Second
+	pingPeriod     = 10 * time.Second
+	maxMessageSize = 512
+)
+
+type conn struct {
+	websocketConn     *websocket.Conn
+	wg         sync.WaitGroup
+	sub        db.ChatroomSubscription
+	chatroomID int
+	senderID   int
 }
 
-func NewConn(c *websocket.Conn) Conn {
-	return Conn {
-		websocketConn: c,
-		send:          make(chan []byte),
+func newConn(websocketConn *websocket.Conn, chatroomID, senderID int) *conn {
+	return &conn{
+		websocketConn:     websocketConn,
+		chatroomID: chatroomID,
+		senderID:   senderID,
 	}
 }
 
-func (c *Conn) Run() {
-	c.waitGroup.Add(2)
+func (c *conn) run() error {
+	sub, err := db.NewChatroomSubscription(c.chatroomID)
+	if err != nil {
+		return err
+	}
+	c.sub = sub
+
+	c.wg.Add(2)
 	go c.readPump()
 	go c.writePump()
-	c.waitGroup.Wait()
+
+	c.wg.Wait()
+	return nil
 }
 
-func (c *Conn) readPump() {
-	defer c.waitGroup.Done()
+func (c *conn) readPump() {
+	defer c.wg.Done()
+	defer c.sub.Close()
+
+	c.websocketConn.SetReadLimit(maxMessageSize)
+	c.websocketConn.SetReadDeadline(time.Now().Add(readTimeout))
+	c.websocketConn.SetPongHandler(func(string) error {
+		c.websocketConn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
 
 	for {
-		readType, msg, err := c.websocketConn.ReadMessage()
-
-		if err != nil {
-			log.Println("error in reading : ", err)
+		var msg chat.Message
+		if err := c.websocketConn.ReadJSON(&msg); err != nil {
+			log.Println("err reading:", err)
 			return
 		}
 
-		if readType != websocket.TextMessage {
-			log.Println("not a text message")
-			continue
-		}
-
-		log.Println("echoing : ", string(msg))
-
-		c.send <- msg
+		db.SendMessage(c.senderID, c.chatroomID, msg.Text)
 	}
 }
 
-func (c *Conn) writePump() {
-	defer c.waitGroup.Done()
+func (c *conn) writePump() {
+	defer c.wg.Done()
+
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case msg, more := <-c.send:
+		case s, more := <-c.sub.C:
 			if !more {
 				return
 			}
-
-			if err := c.websocketConn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				log.Println("error writing", err)
+			c.websocketConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.websocketConn.WriteJSON(s); err != nil {
+				log.Println("err writing:", err)
 				return
 			}
+		case <-ticker.C:
+			c.websocketConn.WriteControl(
+				websocket.PingMessage, nil, time.Now().Add(writeTimeout))
 		}
 	}
 }

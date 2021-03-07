@@ -2,7 +2,8 @@ package main
 
 import (
 	"github.com/gorilla/websocket"
-	"github.com/shinYeongHyeon/messenger-websocket/messengerWebsocket"
+	"github.com/shinYeongHyeon/messenger-websocket/api"
+	"github.com/shinYeongHyeon/messenger-websocket/db"
 	"log"
 	"net/http"
 )
@@ -15,20 +16,18 @@ var webSocketUpgrader = websocket.Upgrader {
 	},
 }
 
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
 func main() {
-	error := http.ListenAndServe(":8081", http.HandlerFunc(
-		func (w http.ResponseWriter, r *http.Request) {
-			conn, err := webSocketUpgrader.Upgrade(w, r, nil)
-			if err != nil {
-				log.Println("err : ", err)
-				return
-			}
+	if err := db.Connect("host=localhost port=5432 user=postgres dbname=go-chat sslmode=disable"); err != nil {
+		log.Fatalln(err)
+	}
 
-			c := messengerWebsocket.NewConn(conn)
-			c.Run()
-		}))
-
-	if error != nil {
-		log.Println("Listen Err")
+	if err := http.ListenAndServe(":8080", api.Handler()); err != nil {
+		log.Fatalln(err)
 	}
 }
